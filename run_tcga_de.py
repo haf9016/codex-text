@@ -69,6 +69,12 @@ def read_expression(path):
     samples=[c for c in x.columns if c not in meta]
     x=x[[gene_col]+samples].copy(); x[gene_col]=x[gene_col].astype(str)
     x=x.set_index(gene_col).apply(pd.to_numeric,errors='coerce').groupby(level=0).mean()
+    raw_values=x.to_numpy(dtype=float)
+    raw_min=float(np.nanmin(raw_values)); raw_max=float(np.nanmax(raw_values)); negative_count=int(np.sum(raw_values<0))
+    if negative_count:
+        raise RuntimeError(f'RSEM matrix contains {negative_count} negative values; cannot apply log2(RSEM+1)')
+    print(f'Raw RSEM range: {raw_min:.6g} to {raw_max:.6g}; applying log2(RSEM+1)',flush=True)
+    x=np.log2(x.clip(lower=0)+1.0)
     choices=[]
     for s in samples:
         code=sample_type(s)
@@ -118,14 +124,14 @@ def de(expr,group):
     gm=group.index[group]; gw=group.index[~group]; rows=[]
     for gene,row in expr.iterrows():
         a=pd.to_numeric(row[gm],errors='coerce').dropna().to_numpy(float); b=pd.to_numeric(row[gw],errors='coerce').dropna().to_numpy(float)
-        z=np.r_[a,b]; ef=float(np.mean(z>0.1)); sd=float(np.std(z,ddof=1)) if len(z)>1 else np.nan
+        z=np.r_[a,b]; ef=float(np.mean(z>0.1)) if len(z) else np.nan; sd=float(np.std(z,ddof=1)) if len(z)>1 else np.nan
         tested=len(a)>=3 and len(b)>=3 and np.isfinite(sd) and sd>0.1 and ef>=.20
         if tested:
             tt=stats.ttest_ind(a,b,equal_var=False,nan_policy='omit'); pw=float(tt.pvalue); tv=float(tt.statistic)
             try: pm=float(stats.mannwhitneyu(a,b,alternative='two-sided').pvalue)
             except Exception: pm=np.nan
         else: pw=tv=pm=np.nan
-        rows.append({'gene_symbol':str(gene),'n_mut':len(a),'n_wt':len(b),'mean_log2_expr_mut':np.mean(a),'mean_log2_expr_wt':np.mean(b),'median_log2_expr_mut':np.median(a),'median_log2_expr_wt':np.median(b),'log2_fold_change':np.mean(a)-np.mean(b),'hedges_g':hg(a,b),'welch_t':tv,'p_value_welch':pw,'p_value_mann_whitney':pm,'expressed_fraction':ef,'sd_all':sd,'tested':tested})
+        rows.append({'gene_symbol':str(gene),'n_mut':len(a),'n_wt':len(b),'mean_log2_expr_mut':float(np.mean(a)) if len(a) else np.nan,'mean_log2_expr_wt':float(np.mean(b)) if len(b) else np.nan,'median_log2_expr_mut':float(np.median(a)) if len(a) else np.nan,'median_log2_expr_wt':float(np.median(b)) if len(b) else np.nan,'log2_fold_change':float(np.mean(a)-np.mean(b)) if len(a) and len(b) else np.nan,'hedges_g':hg(a,b),'welch_t':tv,'p_value_welch':pw,'p_value_mann_whitney':pm,'expressed_fraction':ef,'sd_all':sd,'tested':tested})
     r=pd.DataFrame(rows); r['fdr_bh']=bh(r.p_value_welch); r['significant_fdr05']=(r.fdr_bh<.05)&(r.log2_fold_change.abs()>=.5); r['nominal_p05']=(r.p_value_welch<.05)&(r.log2_fold_change.abs()>=.5); r['rank_score']=np.sign(r.log2_fold_change)*-np.log10(r.p_value_welch.clip(lower=1e-300))
     return r.sort_values(['fdr_bh','p_value_welch','gene_symbol'],na_position='last').reset_index(drop=True)
 
@@ -133,7 +139,7 @@ def de(expr,group):
 def volcano(r,title,path):
     d=r[r.tested & r.p_value_welch.notna()]
     fig,ax=plt.subplots(figsize=(8,6)); ax.scatter(d.log2_fold_change,-np.log10(d.p_value_welch.clip(lower=1e-300)),s=9,alpha=.55)
-    ax.axvline(-.5,ls='--',lw=.8); ax.axvline(.5,ls='--',lw=.8); ax.axhline(-math.log10(.05),ls='--',lw=.8); ax.set(xlabel='Mean difference on log2 RSEM scale',ylabel='-log10 Welch p-value',title=title)
+    ax.axvline(-.5,ls='--',lw=.8); ax.axvline(.5,ls='--',lw=.8); ax.axhline(-math.log10(.05),ls='--',lw=.8); ax.set(xlabel='Mean difference on log2(RSEM + 1) scale',ylabel='-log10 Welch p-value',title=title)
     for _,x in d.nsmallest(12,'p_value_welch').iterrows(): ax.annotate(x.gene_symbol,(x.log2_fold_change,-math.log10(max(x.p_value_welch,1e-300))),fontsize=7)
     fig.tight_layout(); fig.savefig(path,dpi=200); plt.close(fig)
 
@@ -151,7 +157,10 @@ def main():
     mut_patients=set(muts.patient_id); emap=emap[emap.patient_id.isin(mut_patients)].sort_values('patient_id'); patients=emap.patient_id.tolist(); expr=pd.DataFrame({r.patient_id:expr_raw[r.expr_sample_id] for _,r in emap.iterrows()})
     idhmut=set(muts.loc[muts.gene.isin(['IDH1','IDH2']),'patient_id']); wt=[p for p in patients if p not in idhmut]; expr=expr[wt]; muts=muts[muts.patient_id.isin(wt)].copy()
     burden=muts.groupby('patient_id').gene.nunique().reindex(wt,fill_value=0).astype(int); sm=emap.set_index('patient_id').loc[wt].reset_index(); sm['nonsilent_mutated_gene_count']=sm.patient_id.map(burden); sm['idh1_or_idh2_nonsilent_mutation']=False
-    summary={'data_provenance':{'study_id':STUDY,'study_tarball_url':url},'expression_file':'data_mrna_seq_v2_rsem.txt','mutation_file':'data_mutations.txt','expression_scale':'cBioPortal TCGA PanCancer Atlas RSEM normalized expression (log-transformed matrix as distributed)','mutation_definition':'Non-silent coding/splice-site classes from data_mutations.txt','n_primary_expression_patients':len(emap),'n_operational_idh_wildtype':len(wt),'n_operational_idh_mutant_excluded':len(idhmut & set(patients)),'idh_mutant_patient_ids':sorted(idhmut & set(patients)),'panels':{}}
+    expr.to_csv(OUT/'expression_log2_rsem_idhwt.csv.gz',compression='gzip')
+    muts.to_csv(OUT/'nonsilent_mutations_idhwt.csv.gz',index=False,compression='gzip')
+    emap.set_index('patient_id').loc[wt].reset_index().to_csv(OUT/'matched_expression_sample_map_idhwt.csv',index=False)
+    summary={'data_provenance':{'study_id':STUDY,'study_tarball_url':url},'expression_file':'data_mrna_seq_v2_rsem.txt','mutation_file':'data_mutations.txt','expression_scale':'log2(cBioPortal TCGA PanCancer Atlas batch-normalized RSEM + 1)','mutation_definition':'Non-silent coding/splice-site classes from data_mutations.txt','n_primary_expression_patients':len(emap),'n_operational_idh_wildtype':len(wt),'n_operational_idh_mutant_excluded':len(idhmut & set(patients)),'idh_mutant_patient_ids':sorted(idhmut & set(patients)),'panels':{}}
     events=[]
     for label,panel in PANELS.items():
         ep=muts[muts.gene.isin(panel)][['patient_id','gene','mutation_sample_id','variant_classification']].drop_duplicates(); gp=pd.Series(False,index=wt); gp.loc[ep.patient_id.unique()]=True; sm['group_'+label]=sm.patient_id.map(gp).fillna(False); per=ep.groupby('patient_id').gene.apply(lambda x:';'.join(sorted(set(x)))); sm['mutated_panel_genes_'+label]=sm.patient_id.map(per).fillna(''); events.append(ep.assign(analysis=label))
@@ -164,7 +173,7 @@ def main():
         summary['panels'][label]=info
     q95=float(burden.quantile(.95)); sm['hypermutation_q95_flag']=sm.nonsilent_mutated_gene_count>q95; summary['mutation_burden_q95']=q95; summary['hypermutation_q95_patient_ids']=sm.loc[sm.hypermutation_q95_flag,'patient_id'].tolist()
     sm.to_csv(OUT/'cohort_sample_metadata.csv',index=False); pd.concat(events,ignore_index=True).to_csv(OUT/'panel_mutation_events.csv',index=False); pd.DataFrame([{'analysis':k,'panel_gene':g,'panel_membership':'focused' if g in FOCUSED else ('expanded_addition' if g in ADDITIONS else 'canonical15_only')} for k,v in PANELS.items() for g in v]).to_csv(OUT/'panel_definitions.csv',index=False)
-    (OUT/'analysis_summary.json').write_text(json.dumps(summary,indent=2)); (OUT/'README.txt').write_text('Matched TCGA PanCancer Atlas GBM differential expression. Primary panel uses all 25 explicitly named genes from the prior report (18 focused + 7 additions). Non-silent mutations only. Welch test plus BH FDR.\n'); print(json.dumps(summary,indent=2))
+    (OUT/'analysis_summary.json').write_text(json.dumps(summary,indent=2)); (OUT/'README.txt').write_text('Matched TCGA PanCancer Atlas GBM differential expression. Primary panel uses all 25 explicitly named genes from the prior report (18 focused + 7 additions). Non-silent mutations only. Expression was transformed as log2(RSEM + 1). Welch test plus BH FDR.\n'); print(json.dumps(summary,indent=2))
 
 if __name__=='__main__':
     try: main()
