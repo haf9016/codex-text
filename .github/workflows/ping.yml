@@ -1,0 +1,16 @@
+name: ping
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create artifact
+        run: |
+          echo hello > hello.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ping-artifact
+          path: hello.txt
