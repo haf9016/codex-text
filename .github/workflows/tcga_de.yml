@@ -6,6 +6,12 @@ on:
     paths:
       - '.github/workflows/tcga_de.yml'
       - 'run_tcga_de.py'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tcga_de_trigger.txt'
+      - 'run_tcga_de.py'
+      - '.github/workflows/tcga_de.yml'
   workflow_dispatch:
 
 permissions:
