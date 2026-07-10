@@ -38,14 +38,23 @@ jobs:
       - name: Run matched TCGA mutation-expression analysis
         env:
           MPLBACKEND: Agg
-        run: python run_tcga_de.py
+        run: |
+          mkdir -p results
+          set +e
+          python run_tcga_de.py > results/run.log 2>&1
+          status=$?
+          echo "$status" > results/exit_status.txt
+          cat results/run.log
+          exit 0
 
       - name: Package results
+        if: always()
         run: |
           tar -czf tcga_gbm_splicing_de_results.tar.gz results
           sha256sum tcga_gbm_splicing_de_results.tar.gz > tcga_gbm_splicing_de_results.sha256
 
       - name: Upload analysis artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tcga-gbm-splicing-de-results
